@@ -175,9 +175,7 @@ class WoocommerceSyncConnector(models.Model):
                 'name': f'WooCommerce Auto-Sync - {self.settings_woocommerce_connection_url}',
                 'model_id': self.env['ir.model']._get(self._name).id,
                 'code': (
-                    f'model.with_context(cron_running=True).browse({self.id}).with_delay().woocommerce_sync()'
-                    if self.env['ir.module.module'].search([('name', '=', 'queue_job'), ('state', '=', 'installed')], limit=1)
-                    else f'model.with_context(cron_running=True).browse({self.id}).woocommerce_sync()'
+                    f'model.with_context(cron_running=True).browse({self.id}).with_delay().woocommerce_sync()' if 'queue.job' in self.env else f'model.with_context(cron_running=True).browse({self.id}).woocommerce_sync()'
                 ),
                 'active': self.settings_woocommerce_sync_scheduled,
                 'interval_number': self.settings_woocommerce_sync_scheduled_interval_minutes,
@@ -191,9 +189,7 @@ class WoocommerceSyncConnector(models.Model):
                 'name': f'WooCommerce Auto-Sync - {self.settings_woocommerce_connection_url}',
                 'model_id': self.env['ir.model']._get(self._name).id,
                 'code': (
-                    f'model.with_context(cron_running=True).browse({self.id}).with_delay().woocommerce_sync()'
-                    if self.env['ir.module.module'].search([('name', '=', 'queue_job'), ('state', '=', 'installed')], limit=1)
-                    else f'model.with_context(cron_running=True).browse({self.id}).woocommerce_sync()'
+                    f'model.with_context(cron_running=True).browse({self.id}).with_delay().woocommerce_sync()' if 'queue.job' in self.env else f'model.with_context(cron_running=True).browse({self.id}).woocommerce_sync()'
                 ),
                 'active': self.settings_woocommerce_sync_scheduled,
                 'interval_number': self.settings_woocommerce_sync_scheduled_interval_minutes,
@@ -212,7 +208,7 @@ class WoocommerceSyncConnector(models.Model):
         _logger.info("Manual 'Sync Now' button pressed, triggering background sync.")
 
         # Run woocommerce_sync in the background (requires 'queue_job' Odoo add-on)
-        if self.env['ir.module.module'].search([('name', '=', 'queue_job'), ('state', '=', 'installed')], limit=1):
+        if 'queue.job' in self.env:
             self.with_delay().woocommerce_sync()
 
             return {
@@ -487,12 +483,10 @@ class WoocommerceSyncConnector(models.Model):
         return None
 
     @api.model
-    def image_process_attachments(self: models.Model, woocommerce_images: list[dict[str, Any]], product: models.Model, create_attachments: bool = False) -> list[int | dict[str, Any]] | None:
-        """Downloads images and either creates ir.attachment records or prepares data for product.image records."""
+    def image_process_attachments(self: models.Model, woocommerce_images: list[dict[str, Any]], product: models.Model) -> None:
+        """Downloads WooCommerce gallery images and stores them as 'base_multi_image.image' records (if 'base_multi_image' is installed) or as 'ir.attachment' records."""
         if not woocommerce_images:
-            return None
-
-        images = []
+            return
 
         for index, image_data in enumerate(woocommerce_images):
             if not image_data['src'] or not image_data['name']:
@@ -502,37 +496,26 @@ class WoocommerceSyncConnector(models.Model):
                 response = requests.get(image_data['src'], timeout=10)
                 response.raise_for_status()
 
-                img_base64 = b64encode(response.content)
+                img_base64 = b64encode(response.content).decode('utf-8')
 
-                if create_attachments:
-                    # Odoo < 17: Create attachments and append the ID
-                    attachment = self.env['ir.attachment'].create(
-                        {
-                            'name': image_data['name'],
-                            'type': 'binary',
-                            'datas': img_base64,
-                            'mimetype': response.headers.get('Content-Type', 'image/jpeg'),
-                            'res_model': 'product.template',
-                            'res_id': product.id,
-                        },
-                    )
-                    images.append(attachment.id)
+                # Multiple Images Base (requires 'base_multi_image' Odoo add-on)
+                if 'base_multi_image.image' in self.env:
+                    existing = self.env['base_multi_image.image'].search([('owner_model', '=', 'product.template'), ('owner_id', '=', product.id), ('name', '=', image_data['name'])], limit=1)
+
+                    if not existing:
+                        self.env['base_multi_image.image'].create({'owner_model': 'product.template', 'owner_id': product.id, 'name': image_data['name'], 'storage': 'filestore', 'attachment_image': img_base64})
 
                 else:
-                    images.append(
-                        {
-                            'name': image_data['name'],
-                            'sequence': index,
-                            'image_1920': img_base64,
-                        },
-                    )
+                    existing = self.env['ir.attachment'].search([('res_model', '=', 'product.template'), ('res_id', '=', product.id), ('name', '=', image_data['name'])], limit=1)
+                    if not existing:
+                        self.env['ir.attachment'].create(
+                            {'name': image_data['name'], 'type': 'binary', 'datas': img_base64, 'mimetype': response.headers.get('Content-Type', 'image/jpeg'), 'res_model': 'product.template', 'res_id': product.id}
+                        )
 
             except requests.exceptions.RequestException as error:
                 _logger.error(f'Failed to download image from {image_data["src"]}: {error}')
             except Exception as error:
-                _logger.error(f'Error processing the image from {image_data["src"]}: {error}')
-
-        return images if images else None
+                _logger.error(f'Error processing image from {image_data["src"]}: {error}')
 
     @api.model
     def odoo_brand_create_or_retrieve(self: models.Model, brand_name: str) -> models.Model | bool:
@@ -1186,7 +1169,7 @@ class WoocommerceSyncConnector(models.Model):
             product_values = self.woocommerce_product_fields(woocommerce_product, woocommerce_currency, woocommerce_weight_unit, woocommerce_dimension_unit, woocommerce_tax_rates)
 
             # Brand (requires 'product_brand' Odoo add-on)
-            if self.env['ir.module.module'].search([('name', '=', 'product_brand'), ('state', '=', 'installed')], limit=1):
+            if 'product.brand' in self.env:
                 odoo_product_brands_ids = []
                 for brand in woocommerce_product['brands']:
                     odoo_brand = self.odoo_brand_create_or_retrieve(brand['name'])
@@ -1203,7 +1186,7 @@ class WoocommerceSyncConnector(models.Model):
                     odoo_product_categories_ids.append(odoo_product_category.id)
 
             # Categories (requires 'product_multi_category' Odoo add-on)
-            if self.env['ir.module.module'].search([('name', '=', 'product_multi_category'), ('state', '=', 'installed')], limit=1):
+            if 'categ_ids' in self.env['product.template']._fields:
                 product_values.update({'categ_ids': [(6, 0, odoo_product_categories_ids)]})
 
             # Currency
@@ -1211,7 +1194,7 @@ class WoocommerceSyncConnector(models.Model):
                 odoo_product_currency = self.odoo_currency_retrieve(product_values['woocommerce_currency'])
 
             # Dimensions (requires 'product_dimension' Odoo add-on)
-            if self.env['ir.module.module'].search([('name', '=', 'product_dimension'), ('state', '=', 'installed')], limit=1):
+            if 'product_length' in self.env['product.template']._fields:
                 odoo_product_unit_of_measure_dimension = self.odoo_unit_of_measure_dimension_retrieve(product_values['woocommerce_dimension_unit'])
 
                 product_values.update(
@@ -1307,7 +1290,7 @@ class WoocommerceSyncConnector(models.Model):
 
             # Product image gallery
             if odoo_product and self.settings_woocommerce_images_sync and len(woocommerce_product['images']) > 0:
-                self.image_process_attachments(woocommerce_product['images'], odoo_product, create_attachments=True)
+                self.image_process_attachments(woocommerce_product['images'], odoo_product)
 
         except Exception as error:
             # Roll back changes
@@ -2497,7 +2480,7 @@ class WoocommerceSyncConnector(models.Model):
             return None
 
     def wordpress_upload_product_images(self: models.Model, odoo_product: models.Model) -> list[int]:
-        """Upload main image ('image_1920') + gallery images ('product_image_ids') and return list of WordPress media IDs."""
+        """Upload main image ('image_1920') + gallery images ('get_gallery_images()') and return list of WordPress media IDs."""
         self.ensure_one()
 
         wordpress_uploaded_image_ids = []
@@ -2509,9 +2492,7 @@ class WoocommerceSyncConnector(models.Model):
         if odoo_product.image_1920:
             images.append(odoo_product.image_1920)
 
-        if odoo_product.product_image_ids and len(odoo_product.product_image_ids) > 0:
-            gallery_images = odoo_product.product_image_ids.sorted(key=lambda attachment: attachment.id)
-            images.extend(gallery_images.mapped('datas'))
+        images.extend(odoo_product.get_gallery_images())
 
         image_file_name = secure_filename(odoo_product.name.strip().replace(' ', '-').lower())
 
@@ -2636,7 +2617,7 @@ class WoocommerceSyncConnector(models.Model):
                                 product_values['attributes'] = woocommerce_attributes
 
                     # Brand (requires 'product_brand' Odoo add-on)
-                    if self.env['ir.module.module'].search([('name', '=', 'product_brand'), ('state', '=', 'installed')], limit=1) and len(odoo_product.product_brand_id) > 0:
+                    if 'product.brand' in self.env and len(odoo_product.product_brand_id) > 0:
                         woocommerce_brands = []
                         woocommerce_brand = self.woocommerce_attribute_create_or_retrieve(
                             woocommerce_api,
@@ -2654,7 +2635,7 @@ class WoocommerceSyncConnector(models.Model):
                     woocommerce_categories = []
 
                     ## 'categ_ids' (requires 'product_multi_category' Odoo add-on)
-                    if self.env['ir.module.module'].search([('name', '=', 'product_multi_category'), ('state', '=', 'installed')], limit=1) and len(odoo_product.categ_ids) > 0:
+                    if 'categ_ids' in self.env['product.template']._fields and len(odoo_product.categ_ids) > 0:
                         for odoo_category in odoo_product.categ_ids:
                             woocommerce_category = self.woocommerce_attribute_create_or_retrieve(
                                 woocommerce_api,
@@ -2682,7 +2663,7 @@ class WoocommerceSyncConnector(models.Model):
                         product_values.update({'categories': [{'id': category_id} for category_id in woocommerce_categories]})
 
                     # Dimensions (requires 'product_dimension' Odoo add-on)
-                    if self.env['ir.module.module'].search([('name', '=', 'product_dimension'), ('state', '=', 'installed')], limit=1):
+                    if 'product_length' in self.env['product.template']._fields:
                         product_values.update(
                             {
                                 'dimensions': {
@@ -2694,12 +2675,7 @@ class WoocommerceSyncConnector(models.Model):
                         )
 
                     # Images
-                    if (
-                        self.settings_woocommerce_images_sync
-                        and self.settings_wordpress_username
-                        and self.settings_wordpress_user_application_password
-                        and (odoo_product.image_1920 or len(odoo_product.product_image_ids) > 0)
-                    ):
+                    if self.settings_woocommerce_images_sync and self.settings_wordpress_username and self.settings_wordpress_user_application_password and (odoo_product.image_1920 or odoo_product.get_gallery_images()):
                         wordpress_image_ids = self.wordpress_upload_product_images(odoo_product)
                         if wordpress_image_ids:
                             product_values['images'] = [{'id': image_id} for image_id in wordpress_image_ids]
@@ -2760,7 +2736,7 @@ class WoocommerceSyncConnector(models.Model):
                             }
 
                             # Dimensions (requires 'product_dimension' Odoo add-on)
-                            if self.env['ir.module.module'].search([('name', '=', 'product_dimension'), ('state', '=', 'installed')], limit=1):
+                            if 'product_length' in self.env['product.template']._fields:
                                 variation_data.update(
                                     {
                                         'dimensions': {
