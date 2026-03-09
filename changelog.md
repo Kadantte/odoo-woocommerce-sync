@@ -1,5 +1,11 @@
 # Changelog
 
+## v16.0.4.0 / v18.0.4.0 / v19.0.4.0
+
+### Features
+
+- Added support for `base_multi_image.image` (OCA `base_multi_image` module) as the preferred gallery image backend. When `base_multi_image` is installed, product gallery images synced from WooCommerce are stored as `base_multi_image.image` records and uploaded to WooCommerce from the same source. Falls back to `ir.attachment` when `base_multi_image` is not installed.
+
 ## v16.0.3.0 / v18.0.3.0 / v19.0.3.0
 
 ### Features
